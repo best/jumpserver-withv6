@@ -1,7 +1,44 @@
-FROM jumpserver/redis:7.0 as redis
-FROM jumpserver/guacd:1.5.2 as guacd
+FROM jumpserver/python:3.11-slim-buster as stage-1
+ARG TARGETARCH
 
-FROM jumpserver/python:3.11-slim-buster as stage-build
+ARG DEPENDENCIES="                    \
+        ca-certificates               \
+        git                           \
+        git-lfs                       \
+        wget"
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -ex \
+    && rm -f /etc/apt/apt.conf.d/docker-clean \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && apt-get update \
+    && apt-get -y install --no-install-recommends ${DEPENDENCIES} \
+    && echo "no" | dpkg-reconfigure dash
+
+WORKDIR /opt
+
+ARG VERSION=v3.9.3
+ENV VERSION=$VERSION
+
+RUN set -ex \
+    && git clone -b ${VERSION} --depth=1 https://github.com/jumpserver/jumpserver /opt/jumpserver \
+    && sed -i "s@VERSION = .*@VERSION = \"${VERSION}\"@g" /opt/jumpserver/apps/jumpserver/const.py \
+    && chmod +x /opt/jumpserver/entrypoint.sh \
+    && rm -f /opt/jumpserver/Dockerfile /opt/jumpserver/Dockerfile-ee /opt/jumpserver/poetry.lock /opt/jumpserver/pyproject.toml \
+    && rm -rf /opt/jumpserver/.git /opt/jumpserver/.github
+
+WORKDIR /opt/jumpserver
+
+RUN set -ex \
+    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/Dockerfile-ce \
+    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/Dockerfile-ee \
+    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/poetry.lock \
+    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/pyproject.toml \
+    && cd utils \
+    && bash -ixeu build.sh
+
+FROM jumpserver/python:3.11-slim-buster as stage-2
 ARG TARGETARCH
 
 ARG BUILD_DEPENDENCIES="              \
@@ -34,7 +71,8 @@ ARG TOOLS="                           \
         xz-utils                      \
         wget"
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=core \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
     set -ex \
     && rm -f /etc/apt/apt.conf.d/docker-clean \
     && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
@@ -42,13 +80,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=core \
     && apt-get -y install --no-install-recommends ${BUILD_DEPENDENCIES} \
     && apt-get -y install --no-install-recommends ${DEPENDENCIES} \
     && apt-get -y install --no-install-recommends ${TOOLS} \
-    && echo "no" | dpkg-reconfigure dash \
-    && apt-get clean all \
-    && rm -rf /var/lib/apt/lists/*
+    && echo "no" | dpkg-reconfigure dash
 
 WORKDIR /opt
 
-ARG RUST_VERSION=1.65.0
+ARG RUST_VERSION=1.71.1
 RUN set -ex \
     && \
     if [ "${TARGETARCH}" == "s390x" ] || [ "${TARGETARCH}" == "ppc64le" ] || [ "${TARGETARCH}" == "loong64" ]; then \
@@ -56,7 +92,7 @@ RUN set -ex \
         rustArch="${TARGETARCH}"; \
         mkdir -p /opt/rust-install; \
         if [ "${TARGETARCH}" == "loong64" ]; then \
-            rustUrl="https://rust-lang.loongnix.cn/dist/2022-11-03"; \
+            rustUrl="download.jumpserver.org/rust/dist"; \
             rustArch="loongarch64"; \
         fi; \
         if [ "${TARGETARCH}" == "ppc64le" ]; then \
@@ -64,42 +100,38 @@ RUN set -ex \
         fi; \
         wget -O /opt/rust.tar.gz "${rustUrl}/rust-${RUST_VERSION}-${rustArch}-unknown-linux-gnu.tar.xz"; \
         tar -xf /opt/rust.tar.gz -C /opt/rust-install --strip-components=1; \
-        cd /opt/rust-install && ./install.sh \
+        cd /opt/rust-install && ./install.sh; \
         cd /opt && rm -rf /opt/rust-install /opt/rust.tar.gz; \
+        mkdir -p ${CARGO_HOME:-$HOME/.cargo}; \
+        echo -e '[source.crates-io]\nreplace-with = "ustc"\n\n[source.ustc]\nregistry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"' > ${CARGO_HOME:-$HOME/.cargo}/config; \
     fi
 
-ARG VERSION=v3.7.1
-ENV VERSION=$VERSION
-
-RUN set -ex \
-    && git clone -b ${VERSION} --depth=1 https://github.com/jumpserver/jumpserver /opt/jumpserver \
-    && sed -i "s@VERSION = .*@VERSION = \"${VERSION}\"@g" /opt/jumpserver/apps/jumpserver/const.py \
-    && chmod +x /opt/jumpserver/entrypoint.sh \
-    && rm -f /opt/jumpserver/Dockerfile /opt/jumpserver/Dockerfile-ee /opt/jumpserver/poetry.lock /opt/jumpserver/pyproject.toml \
-    && rm -rf /opt/jumpserver/.git /opt/jumpserver/.github
+COPY --from=stage-1 /opt/jumpserver/poetry.lock /opt/jumpserver/pyproject.toml /opt/jumpserver/
 
 WORKDIR /opt/jumpserver
 
-RUN set -ex \
-    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/Dockerfile-ce \
-    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/Dockerfile-ee \
-    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/poetry.lock \
-    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/pyproject.toml \
-    && cd utils \
-    && bash -ixeu build.sh
+ARG PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+ENV GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 
 RUN --mount=type=cache,target=/root/.cache \
     set -ex \
+    && python3 -m venv /opt/py3 \
+    && pip install $(grep cryptography pyproject.toml | sed 's/ = /==/g' | sed 's/"//g') \
     && pip install poetry \
     && poetry config virtualenvs.create false \
+    && . /opt/py3/bin/activate \
     && poetry install --only=main
 
 FROM jumpserver/python:3.11-slim-buster
 ARG TARGETARCH
-ENV LANG=zh_CN.UTF-8
+ENV LANG=zh_CN.UTF-8 \
+    PATH=/opt/py3/bin:$PATH
 
 ARG DEPENDENCIES="                    \
         libjpeg-dev                   \
+        libx11-dev                    \
         libxmlsec1-openssl"
 
 ARG TOOLS="                           \
@@ -107,22 +139,17 @@ ARG TOOLS="                           \
         curl                          \
         default-libmysqlclient-dev    \
         default-mysql-client          \
-        inetutils-ping                \
+        iputils-ping                  \
         locales                       \
-        netcat                        \
-        logrotate                     \
-        openssh-client                \
-        procps                        \
-        sshpass                       \
-        supervisor                    \
-        telnet                        \
-        unzip                         \
-        vim                           \
         nmap                          \
+        openssh-client                \
+        patch                         \
+        sshpass                       \
+        telnet                        \
+        vim                           \
         wget"
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=core \
-    set -ex \
+RUN set -ex \
     && rm -f /etc/apt/apt.conf.d/docker-clean \
     && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && apt-get update \
@@ -134,23 +161,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=core \
     && echo "no" | dpkg-reconfigure dash \
     && echo "zh_CN.UTF-8" | dpkg-reconfigure locales \
     && sed -i "s@# export @export @g" ~/.bashrc \
-    && sed -i "s@# alias @alias @g" ~/.bashrc \
-    && rm -rf /var/lib/apt/lists/*
+    && sed -i "s@# alias @alias @g" ~/.bashrc
 
-COPY --from=stage-build /opt/jumpserver/release/jumpserver /opt/jumpserver
+COPY --from=stage-2 /opt/py3 /opt/py3
+COPY --from=stage-1 /opt/jumpserver/release/jumpserver /opt/jumpserver
+
 WORKDIR /opt/jumpserver
 
-RUN --mount=type=cache,target=/root/.cache \
-    set -ex \
-    && echo > /opt/jumpserver/config.yml \
-    && pip install poetry \
-    && poetry config virtualenvs.create false \
-    && poetry install --only=main
-
-ARG VERSION=v3.7.1
+ARG VERSION=v3.9.3
 ENV VERSION=${VERSION}
-
-WORKDIR /opt/jumpserver
 
 VOLUME /opt/jumpserver/data
 

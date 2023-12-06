@@ -1,7 +1,48 @@
 FROM jumpserver/redis:7.0-buster as redis
-FROM jumpserver/guacd:1.5.2 as guacd
-FROM jumpserver/openjdk:17-slim-buster as jre-build
-FROM jumpserver/python:3.11-slim-buster as stage-build
+FROM jumpserver/guacd:1.5.3-buster as guacd
+FROM jumpserver/web-static:v1.0.1 as static
+FROM jumpserver/openjdk:17-slim-buster as openjdk
+FROM jumpserver/python:3.11-slim-buster as get-core
+ARG TARGETARCH
+
+ARG DEPENDENCIES="                    \
+        ca-certificates               \
+        git                           \
+        git-lfs                       \
+        wget"
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    set -ex \
+    && rm -f /etc/apt/apt.conf.d/docker-clean \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && apt-get update \
+    && apt-get -y install --no-install-recommends ${DEPENDENCIES} \
+    && echo "no" | dpkg-reconfigure dash
+
+WORKDIR /opt
+
+ARG VERSION=v3.9.3
+ENV VERSION=$VERSION
+
+RUN set -ex \
+    && git clone -b ${VERSION} --depth=1 https://github.com/jumpserver/jumpserver /opt/jumpserver \
+    && sed -i "s@VERSION = .*@VERSION = \"${VERSION}\"@g" /opt/jumpserver/apps/jumpserver/const.py \
+    && chmod +x /opt/jumpserver/entrypoint.sh \
+    && rm -f /opt/jumpserver/Dockerfile /opt/jumpserver/Dockerfile-ee /opt/jumpserver/poetry.lock /opt/jumpserver/pyproject.toml \
+    && rm -rf /opt/jumpserver/.git /opt/jumpserver/.github
+
+WORKDIR /opt/jumpserver
+
+RUN set -ex \
+    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/Dockerfile-ce \
+    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/Dockerfile-ee \
+    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/poetry.lock \
+    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/pyproject.toml \
+    && cd utils \
+    && bash -ixeu build.sh
+
+FROM jumpserver/python:3.11-slim-buster as build-core
 ARG TARGETARCH
 
 ARG BUILD_DEPENDENCIES="              \
@@ -30,11 +71,11 @@ ARG TOOLS="                           \
         default-mysql-client          \
         git                           \
         git-lfs                       \
-        unzip                         \
         xz-utils                      \
         wget"
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=core \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
     set -ex \
     && rm -f /etc/apt/apt.conf.d/docker-clean \
     && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
@@ -42,9 +83,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=core \
     && apt-get -y install --no-install-recommends ${BUILD_DEPENDENCIES} \
     && apt-get -y install --no-install-recommends ${DEPENDENCIES} \
     && apt-get -y install --no-install-recommends ${TOOLS} \
-    && echo "no" | dpkg-reconfigure dash \
-    && apt-get clean all \
-    && rm -rf /var/lib/apt/lists/*
+    && echo "no" | dpkg-reconfigure dash
 
 WORKDIR /opt
 
@@ -56,7 +95,7 @@ RUN set -ex \
         rustArch="${TARGETARCH}"; \
         mkdir -p /opt/rust-install; \
         if [ "${TARGETARCH}" == "loong64" ]; then \
-            rustUrl="https://rust-lang.loongnix.cn/dist/${RUST_VERSION}/2023-08-10"; \
+            rustUrl="download.jumpserver.org/rust/dist"; \
             rustArch="loongarch64"; \
         fi; \
         if [ "${TARGETARCH}" == "ppc64le" ]; then \
@@ -66,65 +105,27 @@ RUN set -ex \
         tar -xf /opt/rust.tar.gz -C /opt/rust-install --strip-components=1; \
         cd /opt/rust-install && ./install.sh; \
         cd /opt && rm -rf /opt/rust-install /opt/rust.tar.gz; \
+        mkdir -p ${CARGO_HOME:-$HOME/.cargo}; \
+        echo -e '[source.crates-io]\nreplace-with = "ustc"\n\n[source.ustc]\nregistry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"' > ${CARGO_HOME:-$HOME/.cargo}/config; \
     fi
 
-ARG VERSION=v3.7.1
-ENV VERSION=${VERSION}
-
-RUN set -ex \
-    && git clone -b ${VERSION} --depth=1 https://github.com/jumpserver/jumpserver /opt/jumpserver \
-    && sed -i "s@VERSION = .*@VERSION = \"${VERSION}\"@g" /opt/jumpserver/apps/jumpserver/const.py \
-    && chmod +x /opt/jumpserver/entrypoint.sh \
-    && rm -f /opt/jumpserver/Dockerfile /opt/jumpserver/Dockerfile-ee /opt/jumpserver/poetry.lock /opt/jumpserver/pyproject.toml \
-    && rm -rf /opt/jumpserver/.git /opt/jumpserver/.github
+COPY --from=get-core /opt/jumpserver/poetry.lock /opt/jumpserver/pyproject.toml /opt/jumpserver/
 
 WORKDIR /opt/jumpserver
 
-RUN set -ex \
-    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/Dockerfile-ce \
-    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/Dockerfile-ee \
-    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/poetry.lock \
-    && wget -q https://github.com/wojiushixiaobai/jumpserver-patch/raw/${VERSION}/core/pyproject.toml \
-    && cd utils \
-    && bash -ixeu build.sh
+ARG PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+ENV GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 
 RUN --mount=type=cache,target=/root/.cache \
     set -ex \
+    && python3 -m venv /opt/py3 \
+    && pip install $(grep cryptography pyproject.toml | sed 's/ = /==/g' | sed 's/"//g') \
     && pip install poetry \
     && poetry config virtualenvs.create false \
+    && . /opt/py3/bin/activate \
     && poetry install --only=main
-
-ARG Client_VERSION=v2.0.1
-ARG MRD_VERSION=10.6.7
-ARG VIDEO_PLAYER_VERSION=0.1.9
-ARG OPENSSH_VERSION=v9.2.0.0
-RUN set -ex \
-    && mkdir -p /opt/download/public \
-    && cd /opt/download/public \
-    && wget -qO JumpServer-Client-Installer-x86_64.msi https://github.com/jumpserver/clients/releases/download/${Client_VERSION}/JumpServer-Client-Installer-${Client_VERSION}-x86_64.msi \
-    && wget -qO JumpServer-Client-Installer-x86_64.exe https://github.com/jumpserver/clients/releases/download/${Client_VERSION}/JumpServer-Client-Installer-${Client_VERSION}-x86_64.exe \
-    && wget -qO JumpServer-Client-Installer-amd64.dmg https://github.com/jumpserver/clients/releases/download/${Client_VERSION}/JumpServer-Client-Installer-${Client_VERSION}-amd64.dmg \
-    && wget -qO JumpServer-Client-Installer-arm64.dmg https://github.com/jumpserver/clients/releases/download/${Client_VERSION}/JumpServer-Client-Installer-${Client_VERSION}-arm64.dmg \
-    && wget -qO JumpServer-Client-Installer-amd64.deb https://github.com/jumpserver/clients/releases/download/${Client_VERSION}/JumpServer-Client-Installer-${Client_VERSION}-amd64.deb \
-    && wget -qO JumpServer-Client-Installer-arm64.deb https://github.com/jumpserver/clients/releases/download/${Client_VERSION}/JumpServer-Client-Installer-${Client_VERSION}-arm64.deb \
-    && wget -qO JumpServer-Video-Player.dmg https://github.com/jumpserver/VideoPlayer/releases/download/v0.1.9/JumpServer.Video.Player-${VIDEO_PLAYER_VERSION}.dmg \
-    && wget -qO JumpServer-Video-Player.exe https://github.com/jumpserver/VideoPlayer/releases/download/v0.1.9/JumpServer.Video.Player.Setup.${VIDEO_PLAYER_VERSION}.exe \
-    && wget -qO OpenSSH-Win64.msi https://github.com/PowerShell/Win32-OpenSSH/releases/download/${OPENSSH_VERSION}p1-Beta/OpenSSH-Win64-${OPENSSH_VERSION}.msi \
-    && wget -q https://download.jumpserver.org/public/Microsoft_Remote_Desktop_${MRD_VERSION}_installer.pkg
-
-ARG TINKER_VERSION=v0.1.2
-ARG PYTHON_VERSION=3.10.11
-ARG CHROME_VERSION=114.0.5735.134
-ARG DBEAVER_VERSION=22.3.4
-RUN set -ex \
-    && mkdir -p /opt/download/applets \
-    && cd /opt/download/applets \
-    && wget -qO Tinker_Installer.exe https://download.jumpserver.org/public/Tinker_Installer_${TINKER_VERSION}.exe \
-    && wget -qO dbeaver-patch.msi https://download.jumpserver.org/public/dbeaver-patch-${DBEAVER_VERSION}-x86_64-setup.msi \
-    && wget -q https://github.com/wojiushixiaobai/Chrome-Portable-Win64/releases/download/${CHROME_VERSION}/chromedriver_win32.zip \
-    && wget -q https://github.com/wojiushixiaobai/Chrome-Portable-Win64/releases/download/${CHROME_VERSION}/chrome-win.zip \
-    && wget -q https://download.jumpserver.org/public/dbeaver-ce-${DBEAVER_VERSION}-x86_64-setup.exe \
-    && wget -q https://download.jumpserver.org/public/python-${PYTHON_VERSION}-amd64.exe
 
 FROM jumpserver/python:3.11-slim-buster
 ARG TARGETARCH
@@ -132,6 +133,7 @@ ENV LANG=zh_CN.UTF-8
 
 ARG DEPENDENCIES="                    \
         libjpeg-dev                   \
+        libx11-dev                    \
         libxmlsec1-openssl"
 
 ARG TOOLS="                           \
@@ -140,23 +142,20 @@ ARG TOOLS="                           \
         default-libmysqlclient-dev    \
         default-mysql-client          \
         gnupg2                        \
-        inetutils-ping                \
+        iputils-ping                  \
         locales                       \
         netcat                        \
         logrotate                     \
         openssh-client                \
         p11-kit                       \
-        procps                        \
         sshpass                       \
         supervisor                    \
         telnet                        \
-        unzip                         \
         vim                           \
         nmap                          \
         wget"
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=core \
-    set -ex \
+RUN set -ex \
     && rm -f /etc/apt/apt.conf.d/docker-clean \
     && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && apt-get update \
@@ -168,8 +167,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=core \
     && echo "no" | dpkg-reconfigure dash \
     && echo "zh_CN.UTF-8" | dpkg-reconfigure locales \
     && sed -i "s@# export @export @g" ~/.bashrc \
-    && sed -i "s@# alias @alias @g" ~/.bashrc \
-    && rm -rf /var/lib/apt/lists/*
+    && sed -i "s@# alias @alias @g" ~/.bashrc
 
 RUN set -ex \
     && apt-get update \
@@ -179,31 +177,31 @@ RUN set -ex \
         amd64|arm64) \
             echo "deb https://nginx.org/packages/debian/ buster nginx" > /etc/apt/sources.list.d/nginx.list \
             && wget -qO - https://nginx.org/keys/nginx_signing.key | apt-key add - \
+            && apt-get update \
+            ;; \
+        loongarch64) \
+            echo "deb https://download.jumpserver.org/nginx/packages/debian buster nginx" > /etc/apt/sources.list.d/nginx.list \
+            && wget -qO - https://download.jumpserver.org/nginx/packages/keys/nginx_signing.key | apt-key add - \
+            && apt-get update \
             ;; \
         *) \
             echo "Unsupported architecture: ${dpkgArch}" \
             ;; \
     esac \
     && apt-get -y install --no-install-recommends nginx \
-    && mkdir -p /var/cache/nginx \
-    && apt-get clean all \
-    && rm -rf /var/lib/apt/lists/*
+    && mkdir -p /var/cache/nginx
 
 ENV JAVA_HOME /usr/local/openjdk-17
 ENV PATH $JAVA_HOME/bin:$PATH
 
-COPY --from=jre-build $JAVA_HOME $JAVA_HOME
-COPY --from=jre-build /etc/ld.so.conf.d/docker-openjdk.conf /etc/ld.so.conf.d/docker-openjdk.conf
-COPY --from=jre-build /etc/ca-certificates/update.d/docker-openjdk /etc/ca-certificates/update.d/docker-openjdk
+COPY --from=openjdk $JAVA_HOME $JAVA_HOME
+COPY --from=openjdk /etc/ld.so.conf.d/docker-openjdk.conf /etc/ld.so.conf.d/docker-openjdk.conf
+COPY --from=openjdk /etc/ca-certificates/update.d/docker-openjdk /etc/ca-certificates/update.d/docker-openjdk
 
 RUN set -ex \
     && chmod +x /etc/ca-certificates/update.d/docker-openjdk \
     && /etc/ca-certificates/update.d/docker-openjdk \
-    && ldconfig \
-    && java -Xshare:dump \
-    && rm -rf ~/.java \
-    && javac --version \
-    && java --version
+    && ldconfig
 
 WORKDIR /opt
 
@@ -259,7 +257,7 @@ RUN set -ex \
     && chown root:root /usr/local/bin/rawhelm /usr/local/bin/rawkubectl \
     && rm -f /opt/*.tar.gz
 
-ARG WISP_VERSION=v0.1.15
+ARG WISP_VERSION=v0.1.16
 RUN set -ex \
     && wget -q https://github.com/jumpserver/wisp/releases/download/${WISP_VERSION}/wisp-${WISP_VERSION}-linux-${TARGETARCH}.tar.gz \
     && tar -xf wisp-${WISP_VERSION}-linux-${TARGETARCH}.tar.gz -C /usr/local/bin/ --strip-components=1 \
@@ -287,19 +285,13 @@ RUN set -ex \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=redis /usr/local/bin/redis-cli /usr/local/bin/redis-cli
-COPY --from=stage-build /opt/jumpserver/release/jumpserver /opt/jumpserver
-COPY --from=stage-build /opt/download /opt/download
+COPY --from=build-core /opt/py3 /opt/py3
+COPY --from=get-core /opt/jumpserver/release/jumpserver /opt/jumpserver
+COPY --from=static /opt/download /opt/download
 
-WORKDIR /opt/jumpserver
-RUN --mount=type=cache,target=/root/.cache \
-    set -ex \
-    && echo > /opt/jumpserver/config.yml \
-    && pip install poetry \
-    && poetry config virtualenvs.create false \
-    && poetry install --only=main
-
-ARG VERSION=v3.7.1
+ARG VERSION=v3.9.3
 ENV VERSION=${VERSION}
+ENV PATH=/opt/py3/bin:$PATH
 
 WORKDIR /opt
 
@@ -336,7 +328,7 @@ RUN set -ex \
     && chown -R root:root /opt/kael \
     && rm -f /opt/*.tar.gz
 
-run set -ex \
+RUN set -ex \
     && mkdir -p /opt/chen \
     && wget -q https://github.com/jumpserver/chen-release/releases/download/${VERSION}/chen-${VERSION}.tar.gz \
     && tar -xf chen-${VERSION}.tar.gz -C /opt/chen --strip-components=1 \

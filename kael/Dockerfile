@@ -2,6 +2,7 @@ FROM debian:buster-slim
 ARG TARGETARCH
 
 ARG DEPENDENCIES="                    \
+        ca-certificates               \
         curl                          \
         git                           \
         net-tools                     \
@@ -12,9 +13,7 @@ ARG DEPENDENCIES="                    \
 
 ARG APT_MIRROR=http://mirrors.ustc.edu.cn
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=kael \
-    sed -i "s@http://.*.debian.org@${APT_MIRROR}@g" /etc/apt/sources.list \
-    && rm -f /etc/apt/apt.conf.d/docker-clean \
+RUN set -ex \
     && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && apt-get update \
     && apt-get install -y --no-install-recommends ${DEPENDENCIES} \
@@ -27,7 +26,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked,id=kael \
 
 WORKDIR /opt
 
-ARG WISP_VERSION=v0.1.15
+ARG WISP_VERSION=v0.1.16
 RUN set -ex \
     && wget https://github.com/jumpserver/wisp/releases/download/${WISP_VERSION}/wisp-${WISP_VERSION}-linux-${TARGETARCH}.tar.gz \
     && tar -xf wisp-${WISP_VERSION}-linux-${TARGETARCH}.tar.gz -C /usr/local/bin/ --strip-components=1 \
@@ -37,7 +36,7 @@ RUN set -ex \
 
 WORKDIR /opt/kael
 
-ARG VERSION=v3.7.1
+ARG VERSION=v3.9.3
 ENV VERSION=${VERSION}
 
 RUN set -ex \
