@@ -1,34 +1,25 @@
 # Dockerfile
 
-Jumpserver all in one Dockerfile
-
-This project is Docker image build.
-
-该项目是 Jumpserver 项目的 Docker 镜像生成代码
+JumpServer all-in-one Dockerfile，该项目是 JumpServer all-in-one 部署方式的 Docker 镜像生成代码。
 
 ## How to start
 
-环境迁移和更新升级请检查 SECRET_KEY 是否与之前设置一致, 不能随机生成, 否则数据库所有加密的字段均无法解密
+环境迁移和更新升级请检查 SECRET_KEY 是否与之前设置一致, 不能随机生成, 否则数据库所有加密的字段均无法解密。
 
 ### Quick start
 
-仅在测试环境中快速部署验证功能使用, 生产环境请使用 [标准部署](https://github.com/jumpserver/Dockerfile)
+**注意: all-in-one 部署方式不支持 Client 相关功能, 仅支持在 纯 B/S 架构 Web 端使用。**
 
 ```sh
 docker-compose up -d
-```
-
-```sh
-# 测试完毕后清理环境
-docker-compose down -v
 ```
 
 ### Standard start
 
 使用外置 MySQL 数据库和 Redis:
 
-    - 外置数据库要求 MariaDB 版本大于等于 10.6
-    - 外置 Redis 要求 Redis 版本大于等于 6.2
+    - 外置数据库要求 MariaDB 版本大于等于 10.6；
+    - 外置 Redis 要求 Redis 版本大于等于 6.2。
 
 ```sh
 # 自行部署 MySQL 可以参考 (https://docs.jumpserver.org/zh/master/install/setup_by_lb/#mysql)
@@ -67,12 +58,11 @@ flush privileges;
     - VOLUME /opt/jumpserver/data       # Core 持久化目录, 存储录像日志
     - VOLUME /opt/koko/data             # Koko 持久化目录
     - VOLUME /opt/lion/data             # Lion 持久化目录
-    - VOLUME /opt/magnus/data           # Magnus 持久化目录
     - VOLUME /opt/kael/data             # Kael 持久化目录
     - VOLUME /opt/chen/data             # Chen 持久化目录
     - VOLUME /var/log/nginx             # Nginx 日志持久化目录
 
-注意：自己上面设置的这些信息一定要记录下来。升级需要重新输入使用
+注意：自己上面设置的这些信息一定要记录下来，升级需要重新输入使用。
 
 **启动 JumpServer**
 ```bash
@@ -98,11 +88,10 @@ docker run --name jms_all -d \
   -v /opt/jumpserver/core/data:/opt/jumpserver/data \
   -v /opt/jumpserver/koko/data:/opt/koko/data \
   -v /opt/jumpserver/lion/data:/opt/lion/data \
-  -v /opt/jumpserver/magnus/data:/opt/magnus/data \
   -v /opt/jumpserver/kael/data:/opt/kael/data \
   -v /opt/jumpserver/chen/data:/opt/chen/data \
   -v /opt/jumpserver/web/log:/var/log/nginx \
-  jumpserver/jms_all:v3.9.3
+  jumpserver/jms_all:v3.10.3
 ```
 
 **升级**
@@ -118,7 +107,7 @@ mysqldump -h$DB_HOST -p$DB_PORT -u$DB_USER -p$DB_PASSWORD $DB_NAME > /opt/jumpse
 # 例: mysqldump -h192.168.100.11 -p3306 -ujumpserver -pnu4x599Wq7u0Bn8EABh3J91G jumpserver > /opt/jumpserver-v2.12.0.sql
 
 # 拉取新版本镜像
-docker pull jumpserver/jms_all:v3.9.3
+docker pull jumpserver/jms_all:v3.10.3
 
 # 删掉旧版本容器
 docker rm jms_all
@@ -143,8 +132,7 @@ docker run --name jms_all -d \
   -v /opt/jumpserver/core/data:/opt/jumpserver/data \
   -v /opt/jumpserver/koko/data:/opt/koko/data \
   -v /opt/jumpserver/lion/data:/opt/lion/data \
-  -v /opt/jumpserver/magnus/data:/opt/magnus/data \
   -v /opt/jumpserver/kael/data:/opt/kael/data \
   -v /opt/jumpserver/chen/data:/opt/chen/data \
   -v /opt/jumpserver/web/log:/var/log/nginx \
-  jumpserver/jms_all:v3.9.3
+  jumpserver/jms_all:v3.10.3

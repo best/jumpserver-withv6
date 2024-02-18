@@ -1,45 +1,27 @@
-FROM jumpserver/openjdk:17-slim-buster as openjdk
-FROM debian:buster-slim
+FROM debian:bookworm-slim as stage-1
 ARG TARGETARCH
-ENV LANG=zh_CN.UTF-8
 
 ARG DEPENDENCIES="                    \
         ca-certificates               \
-        curl                          \
-        locales                       \
-        p11-kit                       \
-        telnet                        \
-        vim                           \
         wget"
 
 RUN set -ex \
-    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && apt-get update \
-    && apt-get install -y --no-install-recommends ${DEPENDENCIES} \
+    && apt-get -y install --no-install-recommends ${DEPENDENCIES} \
     && echo "no" | dpkg-reconfigure dash \
-    && echo "zh_CN.UTF-8" | dpkg-reconfigure locales \
-    && sed -i "s@# export @export @g" ~/.bashrc \
-    && sed -i "s@# alias @alias @g" ~/.bashrc \
     && apt-get clean all \
     && rm -rf /var/lib/apt/lists/*
 
-ENV JAVA_HOME /usr/local/openjdk-17
-ENV PATH $JAVA_HOME/bin:$PATH
-
-COPY --from=openjdk $JAVA_HOME $JAVA_HOME
-COPY --from=openjdk /etc/ld.so.conf.d/docker-openjdk.conf /etc/ld.so.conf.d/docker-openjdk.conf
-COPY --from=openjdk /etc/ca-certificates/update.d/docker-openjdk /etc/ca-certificates/update.d/docker-openjdk
-
-RUN set -ex \
-    && chmod +x /etc/ca-certificates/update.d/docker-openjdk \
-    && /etc/ca-certificates/update.d/docker-openjdk \
-    && ldconfig \
-    && java -Xshare:dump \
-    && rm -rf ~/.java \
-    && javac --version \
-    && java --version
-
 WORKDIR /opt
+
+ARG CHECK_VERSION=v1.0.2
+RUN set -ex \
+    && wget https://github.com/jumpserver-dev/healthcheck/releases/download/${CHECK_VERSION}/check-${CHECK_VERSION}-linux-${TARGETARCH}.tar.gz \
+    && tar -xf check-${CHECK_VERSION}-linux-${TARGETARCH}.tar.gz \
+    && mv check /usr/local/bin/ \
+    && chown root:root /usr/local/bin/check \
+    && chmod 755 /usr/local/bin/check \
+    && rm -f check-${CHECK_VERSION}-linux-${TARGETARCH}.tar.gz
 
 ARG WISP_VERSION=v0.1.16
 RUN set -ex \
@@ -51,7 +33,7 @@ RUN set -ex \
 
 WORKDIR /opt/chen
 
-ARG VERSION=v3.9.3
+ARG VERSION=v3.10.3
 ENV VERSION=${VERSION}
 
 RUN set -ex \
@@ -63,6 +45,32 @@ RUN set -ex \
 
 COPY chen/entrypoint.sh .
 RUN chmod 755 ./entrypoint.sh
+
+FROM debian:bookworm-slim
+ENV LANG=en_US.UTF-8
+
+ARG DEPENDENCIES="                    \
+        ca-certificates               \
+        openjdk-17-jre-headless"
+
+RUN set -ex \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ${DEPENDENCIES} \
+    && echo "no" | dpkg-reconfigure dash \
+    && sed -i "s@# export @export @g" ~/.bashrc \
+    && sed -i "s@# alias @alias @g" ~/.bashrc \
+    && sed -i "s@jdk.tls.disabledAlgorithms=SSLv3, TLSv1, TLSv1.1@jdk.tls.disabledAlgorithms=SSLv3@" /etc/java-17-openjdk/security/java.security \
+    && apt-get clean all \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=stage-1 /usr/local/bin /usr/local/bin
+COPY --from=stage-1 /opt/chen /opt/chen
+
+WORKDIR /opt/chen
+
+ARG VERSION=v3.10.3
+ENV VERSION=${VERSION}
 
 VOLUME /opt/chen/data
 
